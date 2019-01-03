@@ -1,5 +1,6 @@
 use std::cmp::Ordering;
 use std::collections::BTreeSet;
+use std::iter::FromIterator;
 use std::path::{Path, PathBuf};
 
 use clap::{App, Arg};
@@ -63,7 +64,7 @@ fn hash_file(path: &Path) -> u64 {
     }
 }
 
-fn file_set(directory: &Path) -> BTreeSet<File> {
+fn file_collection<T: FromIterator<File>>(directory: &Path) -> T {
     println!(
         "Calculating hashes of files in {} recursively...",
         directory.display()
@@ -80,6 +81,100 @@ fn file_set(directory: &Path) -> BTreeSet<File> {
         .collect()
 }
 
+fn find_empty_dirs(directory: &Path) -> Vec<PathBuf> {
+    walkdir::WalkDir::new(directory)
+        .into_iter()
+        .filter_map(|e| e.ok())
+        .filter(|e| is_empty_dir(e.path()))
+        .map(|e| e.path().to_path_buf())
+        .collect()
+}
+
+fn is_empty_dir(path: &Path) -> bool {
+    path.is_dir() && std::fs::read_dir(path).map(|i| i.count()).unwrap_or(0) == 0
+}
+
+fn parent_dir_is_date(path: &Path) -> bool {
+    path.parent()
+        .unwrap()
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .starts_with("20")
+}
+
+fn delete_duplicates(paths: &[PathBuf]) {
+    let in_album = paths.into_iter().any(|path| !parent_dir_is_date(path));
+
+    if in_album && paths.len() > 1 {
+        paths.into_iter().for_each(|path| {
+            if parent_dir_is_date(path) {
+                println!("Deleting {}", path.display());
+                std::fs::remove_file(path).unwrap();
+            }
+        })
+    }
+}
+
+fn diff_directories(dir1: &Path, dir2: &Path) -> Vec<PathBuf> {
+    let now = std::time::SystemTime::now();
+    let dir1_files: BTreeSet<File> = file_collection(&dir1);
+    println!(
+        "Took {:?} to hash {} files.",
+        now.elapsed().unwrap(),
+        dir1_files.len()
+    );
+
+    let now = std::time::SystemTime::now();
+    let dir2_files: BTreeSet<File> = file_collection(dir2);
+    println!(
+        "Took {:?} to hash {} files.",
+        now.elapsed().unwrap(),
+        dir2_files.len()
+    );
+
+    println!("Determining symmetric difference between file sets...");
+    dir1_files
+        .symmetric_difference(&dir2_files)
+        .map(|f| f.path.clone())
+        .collect()
+}
+
+fn find_and_delete_duplicates(directory: &Path) {
+    let now = std::time::SystemTime::now();
+    let mut files: Vec<File> = file_collection(&directory);
+    println!(
+        "Took {:?} to hash {} files.",
+        now.elapsed().unwrap(),
+        files.len()
+    );
+
+    files.sort_unstable();
+
+    let mut last_hash: Option<u64> = None;
+    let mut current_run: Vec<PathBuf> = Vec::new();
+    for i in 0..files.len() {
+        match last_hash {
+            Some(h) if h != files[i].hash => {
+                delete_duplicates(&current_run);
+                current_run.clear();
+                last_hash = Some(files[i].hash);
+            }
+            None => last_hash = Some(files[i].hash),
+            _ => {}
+        }
+        current_run.push(files[i].path.clone());
+    }
+
+    let now = std::time::SystemTime::now();
+    let files = find_empty_dirs(&directory);
+    println!("Took {:?} to find empty dirs.", now.elapsed().unwrap());
+
+    files
+        .into_iter()
+        .for_each(|path| std::fs::remove_dir(path).unwrap());
+}
+
 fn main() {
     let matches = App::new("dir-diff")
         .version(env!("CARGO_PKG_VERSION"))
@@ -91,36 +186,32 @@ fn main() {
         )
         .arg(
             Arg::with_name("dir2")
-                .help("Another directory.")
-                .required(true)
+                .help(
+                    "Another directory. If specified, the utility prints a \
+                     list of files that are unique to dir1 or dir2 according \
+                     to their hashes. If unspecified, the utility deletes \
+                     duplicate files and empty directories in dir1.",
+                )
                 .index(2),
         )
         .get_matches();
 
     let dir1 = matches.value_of("dir1").map(Path::new).unwrap();
-    let dir2 = matches.value_of("dir2").map(Path::new).unwrap();
+    let dir2_option = matches.value_of("dir1").map(Path::new);
 
-    let now = std::time::SystemTime::now();
-    let dir1_files = file_set(dir1);
-    println!(
-        "Took {:?} to hash {} files.",
-        now.elapsed().unwrap(),
-        dir1_files.len()
-    );
-
-    let now = std::time::SystemTime::now();
-    let dir2_files = file_set(dir2);
-    println!(
-        "Took {:?} to hash {} files.",
-        now.elapsed().unwrap(),
-        dir2_files.len()
-    );
-
-    println!("Determining symmetric difference between file sets...");
-    let unmatched_files: Vec<File> = dir1_files
-        .symmetric_difference(&dir2_files)
-        .cloned()
-        .collect();
-
-    println!("{:?}", unmatched_files);
+    if let Some(dir2) = dir2_option {
+        println!(
+            "Diffing the directories {} and {}",
+            dir1.display(),
+            dir2.display()
+        );
+        let unmatched_files = diff_directories(dir1, dir2);
+        println!("{:?}", unmatched_files);
+    } else {
+        println!(
+            "Removing duplicate files and empty directories in {}",
+            dir1.display()
+        );
+        find_and_delete_duplicates(dir1);
+    }
 }
