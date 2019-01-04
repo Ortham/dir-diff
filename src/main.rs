@@ -153,17 +153,17 @@ fn find_and_delete_duplicates(directory: &Path) {
 
     let mut last_hash: Option<u64> = None;
     let mut current_run: Vec<PathBuf> = Vec::new();
-    for i in 0..files.len() {
+    for file in files {
         match last_hash {
-            Some(h) if h != files[i].hash => {
+            Some(h) if h != file.hash => {
                 delete_duplicates(&current_run);
                 current_run.clear();
-                last_hash = Some(files[i].hash);
+                last_hash = Some(file.hash);
             }
-            None => last_hash = Some(files[i].hash),
+            None => last_hash = Some(file.hash),
             _ => {}
         }
-        current_run.push(files[i].path.clone());
+        current_run.push(file.path.clone());
     }
 
     let now = std::time::SystemTime::now();
